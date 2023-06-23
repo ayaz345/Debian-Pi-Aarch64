@@ -60,7 +60,7 @@ def getGPIOPulseData():
 	pulsedata = []
 
 	aborted = False
-	while aborted == False:
+	while not aborted:
 		# Wait for transition
 		if value:
 			channel = GPIO.wait_for_edge(irreceiver_pin, GPIO.FALLING, timeout=PULSETIMEOUTMS);
@@ -70,12 +70,11 @@ def getGPIOPulseData():
 		if channel is None:
 			if ctr == 0:
 				continue
-			else:
-				aborted = True
-				if len(pulsedata) == 0:
-					# CTRL+C
-					return [(-1, -1)]
-				break;
+			aborted = True
+			if not pulsedata:
+				# CTRL+C
+				return [(-1, -1)]
+			break;
 
 		# high/low Length
 		now = datetime.now()
@@ -83,20 +82,17 @@ def getGPIOPulseData():
 		pulseTime = now
 
 		# Update value (changed triggered), this also inverts value before saving
-		if value:
-			value = 0
-		else:
-			value = 1
+		value = 0 if value else 1
 		pulsedata.append((value, pulseLength.microseconds))
 
 		ctr = ctr + 1
-		if pulseLength.microseconds > PULSETAIL_MAXMICROS_NEC:
+		if (
+			pulseLength.microseconds > PULSETAIL_MAXMICROS_NEC
+			or ctr > PULSEDATA_MAXCOUNT
+		):
 			break
-		elif ctr > PULSEDATA_MAXCOUNT:
-			break
-
 	# Data is most likely incomplete
-	if aborted == True:
+	if aborted:
 		return []
 	elif ctr >= PULSEDATA_MAXCOUNT:
 		print ("    * Unable to decode. Please try again *")
@@ -127,7 +123,7 @@ def getLIRCPulseData():
 
 	# Clear old data if necessary
 	if os.path.exists(irlogfile) == True:
-		os.remove(irlogfile) 
+		os.remove(irlogfile)
 	# Start logging
 	try:
 		# Old method
@@ -171,22 +167,21 @@ def getLIRCPulseData():
 	terminated = False
 	if os.path.exists(irlogfile) == True:
 		ctr = 0
-		fp = open(irlogfile, "r")
-		for curline in fp:
-			if len(curline) > 0:
-				rowdata = curline.split(" ")
-				if len(rowdata) == 2:
-					duration = int(rowdata[1])
-					value = 0
-					if rowdata[0] == "pulse":
-						value = 1
-					ctr = ctr + 1
-					if value == 1 or ctr > 1:
-						if duration > PULSETAIL_MAXMICROS_NEC:
-							terminated = True
-							break
-						pulsedata.append((value, duration))
-		fp.close()
+		with open(irlogfile, "r") as fp:
+			for curline in fp:
+				if len(curline) > 0:
+					rowdata = curline.split(" ")
+					if len(rowdata) == 2:
+						value = 0
+						if rowdata[0] == "pulse":
+							value = 1
+						ctr = ctr + 1
+						if value == 1 or ctr > 1:
+							duration = int(rowdata[1])
+							if duration > PULSETAIL_MAXMICROS_NEC:
+								terminated = True
+								break
+							pulsedata.append((value, duration))
 		os.remove(irlogfile) 
 
 	# Check if terminating pulse detected
@@ -219,10 +214,7 @@ PULSETAIL_MAXMICROS_NEC = 12000
 
 
 rev = GPIO.RPI_REVISION
-if rev == 2 or rev == 3:
-	bus = smbus.SMBus(1)
-else:
-	bus = smbus.SMBus(0)
+bus = smbus.SMBus(1) if rev in [2, 3] else smbus.SMBus(0)
 
 
 # Standard Methods
@@ -231,7 +223,7 @@ def getbytestring(pulsedata):
 	for curbyte in pulsedata:
 		tmpstr = hex(curbyte)[2:]
 		while len(tmpstr) < 2:
-			tmpstr = "0" + tmpstr
+			tmpstr = f"0{tmpstr}"
 		outstring = outstring+tmpstr
 	return outstring
 
@@ -245,9 +237,7 @@ def pulse2byteNEC(pulsedata):
 	curbyte = 0
 	bitcount = 0
 	for (mode, duration) in pulsedata:
-		if mode == 1:
-			continue
-		elif duration > PULSEBIT_MAXMICROS_NEC:
+		if mode == 1 or duration > PULSEBIT_MAXMICROS_NEC:
 			continue
 		elif duration > PULSEBIT_ZEROMICROS_NEC:
 			curbyte = curbyte*2 + 1
@@ -267,15 +257,10 @@ def pulse2byteNEC(pulsedata):
 
 
 def bytecompare(a, b):
-	idx = 0
 	maxidx = len(a)
 	if maxidx != len(b):
 		return 1
-	while idx < maxidx:
-		if a[idx] != b[idx]:
-			return 1
-		idx = idx + 1
-	return 0
+	return next((1 for idx in range(maxidx) if a[idx] != b[idx]), 0)
 
 
 # Main Flow
@@ -331,14 +316,14 @@ else:
 readaborted = False
 # decoding loop
 while buttonidx < len(buttonlist):
-	print ("Press your button for "+buttonlist[buttonidx]+" (CTRL+C to abort)")
+	print(f"Press your button for {buttonlist[buttonidx]} (CTRL+C to abort)")
 	irprotocol = ""
 	outdata = []
 	verifycount = 0
 	readongoing = True
 
 	# Handles NEC protocol Only
-	while readongoing == True:
+	while readongoing:
 		# Try GPIO-based reading, if it fails, fallback to LIRC
 		pulsedata = getGPIOPulseData()
 		if len(pulsedata) == 1:
@@ -376,10 +361,7 @@ while buttonidx < len(buttonlist):
 			# NEC has 9ms head, +/- 1ms
 			curdata = pulse2byteNEC(pulsedata)
 			if verifycount > 0:
-				if bytecompare(outdata, curdata) == 0:
-					verifycount = verifycount + 1
-				else:
-					verifycount = 0
+				verifycount = verifycount + 1 if bytecompare(outdata, curdata) == 0 else 0
 			else:
 				outdata = curdata
 				verifycount = 1
@@ -391,7 +373,7 @@ while buttonidx < len(buttonlist):
 			elif verifycount == 0:
 				print ("    * IR code mismatch, please try again *")
 			elif VERIFYTARGET - verifycount > 1:
-				print ("    Press the button "+ str(VERIFYTARGET - verifycount)+ " more times")
+				print(f"    Press the button {str(VERIFYTARGET - verifycount)} more times")
 			else:
 				print ("    Press the button 1 more time")
 
@@ -410,7 +392,7 @@ while buttonidx < len(buttonlist):
 				print ("    Button already assigned. Please try again")
 				verifycount = 0
 				break
-			checkidx = checkidx + 1
+			checkidx += 1
 
 	# Store code, and power button code if applicable
 	if verifycount > 0:
@@ -431,44 +413,39 @@ if len(powerdata) > 0 and readaborted == False:
 	# Update IR Conf if there are other button
 	if buttonidx > 1:
 		print("Updating Remote Control Codes...")
-		fp = open(irconffile, "w")
+		with open(irconffile, "w") as fp:
+			# Standard NEC conf header
+			fp.write("#\n")
+			fp.write("# Based on NEC templates at http://lirc.sourceforge.net/remotes/nec/\n")
+			fp.write("# Configured codes based on data gathered\n")
+			fp.write("#\n")
+			fp.write("\n")
+			fp.write("begin remote\n")
+			fp.write("  name  argon\n")
+			fp.write("  bits           32\n")
+			fp.write("  flags SPACE_ENC\n")
+			fp.write("  eps            20\n")
+			fp.write("  aeps          200\n")
+			fp.write("\n")
+			fp.write("  header       8800  4400\n")
+			fp.write("  one           550  1650\n")
+			fp.write("  zero          550   550\n")
+			fp.write("  ptrail        550\n")
+			fp.write("  repeat       8800  2200\n")
+			fp.write("  gap          38500\n")
+			fp.write("  toggle_bit      0\n")
+			fp.write("\n")
+			fp.write("  frequency    38000\n")
+			fp.write("\n")
+			fp.write("      begin codes\n")
 
-		# Standard NEC conf header
-		fp.write("#\n")
-		fp.write("# Based on NEC templates at http://lirc.sourceforge.net/remotes/nec/\n")
-		fp.write("# Configured codes based on data gathered\n")
-		fp.write("#\n")
-		fp.write("\n")
-		fp.write("begin remote\n")
-		fp.write("  name  argon\n")
-		fp.write("  bits           32\n")
-		fp.write("  flags SPACE_ENC\n")
-		fp.write("  eps            20\n")
-		fp.write("  aeps          200\n")
-		fp.write("\n")
-		fp.write("  header       8800  4400\n")
-		fp.write("  one           550  1650\n")
-		fp.write("  zero          550   550\n")
-		fp.write("  ptrail        550\n")
-		fp.write("  repeat       8800  2200\n")
-		fp.write("  gap          38500\n")
-		fp.write("  toggle_bit      0\n")
-		fp.write("\n")
-		fp.write("  frequency    38000\n")
-		fp.write("\n")
-		fp.write("      begin codes\n")
-
-		# Write Key Codes
-		buttonidx = 1
-		while buttonidx < len(buttonlist):
-			fp.write("          KEY_"+buttonlist[buttonidx]+"                0x"+ircodelist[buttonidx]+"\n")
-			buttonidx = buttonidx + 1
-		fp.write("      end codes\n")
-		fp.write("end remote\n")
-		fp.close()
-
-
-
+			for buttonidx in range(1, len(buttonlist)):
+				fp.write(
+					f"          KEY_{buttonlist[buttonidx]}                0x{ircodelist[buttonidx]}"
+					+ "\n"
+				)
+			fp.write("      end codes\n")
+			fp.write("end remote\n")
 ###############
 # GPIO-Only Cleanup
 GPIO.cleanup()
